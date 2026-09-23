@@ -62,14 +62,18 @@ def evaluate_resolved_predictions(conn) -> int:
 
 def check_drift(client: PulsoTransmiClient) -> dict:
     me = client.session.get(f"{client.base_url}/v1/me", headers=client.auth_headers(), timeout=20).json()
-    participant_id = me.get("participant_id")
+    display_name = me.get("display_name")
 
     cumulative = client.leaderboard(window="cumulative")
     rolling = client.leaderboard(window="rolling_24h")
 
     def find_score(board: dict) -> float | None:
-        for entry in board.get("entries", board.get("leaderboard", [])):
-            if entry.get("participant_id") == participant_id:
+        # /v1/leaderboard has no participant_id in its rows -- display_name
+        # is the only identifying field it returns (verified against the
+        # live response, not guessed from the OpenAPI schema, which leaves
+        # this endpoint's body untyped).
+        for entry in board.get("data", []):
+            if entry.get("display_name") == display_name:
                 return entry.get("accuracy")
         return None
 
