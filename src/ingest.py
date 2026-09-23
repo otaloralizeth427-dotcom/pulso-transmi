@@ -15,6 +15,7 @@ def run() -> int:
     client = PulsoTransmiClient()
     with db.connect() as conn:
         cursor = db.get_ingestion_cursor(conn, SOURCE)
+        resume_cursor = cursor  # last position known to have more data after it
         total = 0
         last_observed_at = None
         pages = 0
@@ -28,16 +29,23 @@ def run() -> int:
             next_cursor = page.get("next_cursor")
             pages += 1
             if not next_cursor or next_cursor == cursor:
-                cursor = next_cursor
+                # Caught up to the current frontier: null next_cursor means
+                # "nothing more right now". If we'd already advanced past a
+                # non-null cursor this run, keep that position for next time
+                # instead of losing it. If the whole available stream fit in
+                # one page (no non-null cursor was ever issued), there is no
+                # resume position to persist -- the next run re-requests from
+                # the start. That's wasteful once the stream grows large, but
+                # harmless: upsert on (station_id, observed_at) makes
+                # re-ingesting already-seen rows a no-op, never a duplicate.
                 break
+            resume_cursor = next_cursor
             cursor = next_cursor
-            # cursor only advances in memory here; it is only persisted
-            # below, after the whole page set has been upserted successfully.
             if pages > 100:
                 break
-        db.set_ingestion_cursor(conn, SOURCE, cursor, last_observed_at)
+        db.set_ingestion_cursor(conn, SOURCE, resume_cursor, last_observed_at)
         print(f"ingest: {total} new observations across {pages} page(s); "
-              f"cursor now at {cursor!r}, last_observed_at={last_observed_at}")
+              f"cursor now at {resume_cursor!r}, last_observed_at={last_observed_at}")
     return 0
 
 

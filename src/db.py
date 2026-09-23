@@ -60,14 +60,18 @@ def set_ingestion_cursor(conn, source: str, cursor: str, last_observed_at: str |
 def upsert_observations(conn, rows: list[dict]) -> None:
     if conn is None or not rows:
         return
+    from psycopg2.extras import execute_values
+
     with conn.cursor() as cur:
-        cur.executemany(
+        execute_values(
+            cur,
             """
             insert into observations (station_id, observed_at, demand)
-            values (%(station_id)s, %(observed_at)s, %(demand)s)
+            values %s
             on conflict (station_id, observed_at) do update set demand = excluded.demand
             """,
-            rows,
+            [(r["station_id"], r["observed_at"], r["demand"]) for r in rows],
+            page_size=1000,
         )
 
 
