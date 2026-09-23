@@ -1,0 +1,44 @@
+name: pipeline
+
+on:
+  schedule:
+    # Suggested routine from the course guide: near minute 07 and minute 37
+    # of every hour (guia metodologica p.7). The cron clock can drift on
+    # free runners -- that's fine, every script re-checks the live API
+    # state instead of trusting its own timing.
+    - cron: "7,37 * * * *"
+  workflow_dispatch: {}
+
+env:
+  PYTHONPATH: src
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Collector (incremental ingest)
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: python src/ingest.py
+
+      - name: Predict + submit
+        env:
+          PTM_API_KEY: ${{ secrets.PTM_API_KEY }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: python src/predict.py
+
+      - name: Evaluate + drift check
+        env:
+          PTM_API_KEY: ${{ secrets.PTM_API_KEY }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: python src/monitor.py
