@@ -2,15 +2,24 @@ name: pipeline
 
 on:
   schedule:
-    # Suggested routine from the course guide: near minute 07 and minute 37
-    # of every hour (guia metodologica p.7). The cron clock can drift on
-    # free runners -- that's fine, every script re-checks the live API
-    # state instead of trusting its own timing.
-    - cron: "7,37 * * * *"
+    # Every 10 minutes, not just minute 07/37. GitHub's free-tier cron
+    # silently drops or delays scheduled runs under load -- in the first 47h
+    # of this pipeline only 12 of ~94 expected half-hourly triggers actually
+    # fired. A tighter schedule raises the odds that *some* trigger survives
+    # inside any given hour; each run that does fire then polls for up to
+    # 12 minutes (src/watch_and_submit.py) instead of checking once and
+    # giving up, so it doesn't need to land on an exact minute either.
+    - cron: "*/10 * * * *"
   workflow_dispatch: {}
 
 env:
   PYTHONPATH: src
+
+concurrency:
+  # If a previous run is still polling when a new one fires, let the new one
+  # take over instead of piling up parallel runners against the same cycle.
+  group: pipeline
+  cancel-in-progress: true
 
 jobs:
   run:
@@ -26,19 +35,8 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Collector (incremental ingest)
-        env:
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-        run: python src/ingest.py
-
-      - name: Predict + submit
+      - name: Watch for the open cycle and submit (collector + predict, polling)
         env:
           PTM_API_KEY: ${{ secrets.PTM_API_KEY }}
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-        run: python src/predict.py
-
-      - name: Evaluate + drift check
-        env:
-          PTM_API_KEY: ${{ secrets.PTM_API_KEY }}
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-        run: python src/monitor.py
+        run: python src/watch_and_submit.py

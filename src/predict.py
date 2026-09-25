@@ -23,6 +23,11 @@ def baseline_predict(series: pd.Series, target_at: pd.Timestamp) -> float | None
     return float(series.loc[lag_at])
 
 
+NO_OPEN_CYCLE = 2  # distinct from success (0) and failure (1) -- callers that
+                    # poll for an open cycle need to tell "nothing to do yet"
+                    # apart from "actually submitted".
+
+
 def run() -> int:
     if not PTM_API_KEY:
         print("predict: PTM_API_KEY is not set, cannot submit. Aborting.")
@@ -32,7 +37,7 @@ def run() -> int:
     cycle = client.current_cycle()
     if cycle is None or cycle.get("state") != "open":
         print(f"predict: no open cycle right now (state={cycle.get('state') if cycle else None}); nothing to do.")
-        return 0
+        return NO_OPEN_CYCLE
 
     cycle_id = cycle["cycle_id"]
     data_cutoff = cycle["data_cutoff"]
@@ -127,10 +132,14 @@ def run() -> int:
         status, resp = client.submit(payload, idem_key)
         print(f"predict: submit status={status} response={resp}")
 
-        if status == 201:
+        # 201 = new submission accepted. 200 = idempotent replay of a submission
+        # this same run already made (same Idempotency-Key, same payload) --
+        # also a success, not a failure (guia p.9: "repetir con la misma llave
+        # devuelve el mismo recibo, sin duplicarla").
+        if status in (200, 201):
             db.log_predictions(conn, run_id, prediction_log_rows)
             db.finish_pipeline_run(conn, run_id, "success",
-                                    f"submission_id={resp.get('submission_id')} model={model_version}")
+                                    f"submission_id={resp.get('submission_id')} model={model_version} http={status}")
         else:
             db.finish_pipeline_run(conn, run_id, "failed", f"submit rejected: {resp}")
             return 1

@@ -1,13 +1,33 @@
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 
 from config import PTM_API_BASE, PTM_API_KEY
+
+
+def _session_with_retries() -> requests.Session:
+    """The self-hosted API has occasionally dropped connections under load
+    (seen twice in production runs as ConnectTimeout on GitHub's runners,
+    killing the whole job). Retry transient network/5xx failures instead of
+    letting one blip cost an entire submission window."""
+    session = requests.Session()
+    retry = Retry(
+        total=4,
+        backoff_factor=2,  # 2s, 4s, 8s, 16s
+        status_forcelist=[502, 503, 504],
+        allowed_methods=["GET", "POST"],
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
 
 
 class PulsoTransmiClient:
     def __init__(self, base_url: str = PTM_API_BASE, api_key: str | None = PTM_API_KEY):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
-        self.session = requests.Session()
+        self.session = _session_with_retries()
 
     def auth_headers(self) -> dict:
         if not self.api_key:
