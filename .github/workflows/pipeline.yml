@@ -2,13 +2,17 @@ name: pipeline
 
 on:
   schedule:
-    # Redundant triggers -- GitHub's free-tier cron still doesn't fire
-    # reliably at 10-minute granularity (confirmed: most 10-minute slots
-    # never actually ran). This is just a backup fuse now: each run that
-    # DOES fire polls for up to 50 minutes (src/watch_and_submit.py), which
-    # alone covers most of any given hour, so getting a trigger every 10
-    # minutes is no longer load-bearing -- it only needs to fire once in a
-    # while to keep the relay going.
+    # GitHub's free-tier cron does not fire reliably at this granularity
+    # (confirmed repeatedly: most 10-minute slots simply never ran, some
+    # gaps over 2 hours). Each run that does fire polls for up to 50 minutes
+    # (src/watch_and_submit.py) rather than checking once, which covers
+    # most of an hour on its own -- but there is no fully cron-independent
+    # fix within free-tier GitHub Actions without a self-retriggering
+    # workflow, which was intentionally not added here (flagged as an
+    # unauthorized-persistence pattern -- a workflow that keeps re-launching
+    # itself indefinitely). Until/unless the user explicitly authorizes
+    # that, gaps between runs are mitigated, not eliminated: expect to
+    # occasionally need a manual `gh workflow run pipeline` to bridge one.
     - cron: "*/10 * * * *"
   workflow_dispatch: {}
 
@@ -16,10 +20,10 @@ env:
   PYTHONPATH: src
 
 concurrency:
-  # Queue instead of cancel: if a run is mid-poll when the next trigger
-  # fires, let it finish its 50-minute window and have the new one start
-  # right after, so coverage chains continuously instead of a fresh trigger
-  # killing a run that might be seconds from catching an open cycle.
+  # Queue instead of cancel: if a scheduled trigger fires while a run is
+  # mid-poll (or while its self-triggered successor is starting), let it
+  # queue instead of killing a run that might be seconds from catching an
+  # open cycle.
   group: pipeline
   cancel-in-progress: false
 
