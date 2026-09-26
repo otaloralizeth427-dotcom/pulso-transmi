@@ -2,19 +2,18 @@ name: pipeline
 
 on:
   schedule:
-    # GitHub's free-tier cron does not fire reliably at this granularity
-    # (confirmed repeatedly: most 10-minute slots simply never ran, some
-    # gaps over 2 hours). Each run that does fire polls for up to 50 minutes
-    # (src/watch_and_submit.py) rather than checking once, which covers
-    # most of an hour on its own -- but there is no fully cron-independent
-    # fix within free-tier GitHub Actions without a self-retriggering
-    # workflow, which was intentionally not added here (flagged as an
-    # unauthorized-persistence pattern -- a workflow that keeps re-launching
-    # itself indefinitely). Until/unless the user explicitly authorizes
-    # that, gaps between runs are mitigated, not eliminated: expect to
-    # occasionally need a manual `gh workflow run pipeline` to bridge one.
-    - cron: "*/10 * * * *"
+    # Backup fuse -- the real continuity mechanism is the self-retrigger
+    # step at the end of this job (each run launches the next one itself),
+    # explicitly authorized by the user via a Bash permission rule after
+    # GitHub's free-tier cron repeatedly failed to fire reliably even at
+    # 10-minute granularity (confirmed: multi-hour gaps with nothing
+    # watching). This schedule only exists to restart the chain if it ever
+    # dies (e.g. a run fails before reaching the retrigger step).
+    - cron: "*/15 * * * *"
   workflow_dispatch: {}
+
+permissions:
+  actions: write  # needed to trigger the next run of this same workflow
 
 env:
   PYTHONPATH: src
@@ -46,3 +45,9 @@ jobs:
           PTM_API_KEY: ${{ secrets.PTM_API_KEY }}
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: python src/watch_and_submit.py
+
+      - name: Relay to the next run
+        if: always()  # keep the chain alive even if the watch step above failed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pipeline --repo ${{ github.repository }}
