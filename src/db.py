@@ -171,6 +171,22 @@ def log_validation_metrics(conn, run_id: str | None, rows: list[dict]) -> None:
         )
 
 
+def log_leaderboard_snapshot(conn, window_kind: str, accuracy, coverage, rank, signal: str) -> None:
+    """Feeds the read-only dashboard's leaderboard-position widget. Written
+    with the same service-role DB connection everything else uses, so the
+    submissions API key never has to reach the browser to show this."""
+    if conn is None:
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            insert into leaderboard_snapshots (window_kind, accuracy, coverage, rank, signal, checked_at)
+            values (%s, %s, %s, %s, %s, now())
+            """,
+            (window_kind, accuracy, coverage, rank, signal),
+        )
+
+
 def psycopg2_json(value: dict):
     import json
     from psycopg2.extras import Json

@@ -60,25 +60,28 @@ def evaluate_resolved_predictions(conn) -> int:
     return len(metrics)
 
 
-def check_drift(client: PulsoTransmiClient) -> dict:
+def find_entry(board: dict, display_name: str) -> dict | None:
+    # /v1/leaderboard has no participant_id in its rows -- display_name is
+    # the only identifying field it returns (verified against the live
+    # response, not guessed from the OpenAPI schema, which leaves this
+    # endpoint's body untyped).
+    for entry in board.get("data", []):
+        if entry.get("display_name") == display_name:
+            return entry
+    return None
+
+
+def check_drift(client: PulsoTransmiClient, conn) -> dict:
     me = client.session.get(f"{client.base_url}/v1/me", headers=client.auth_headers(), timeout=20).json()
     display_name = me.get("display_name")
 
     cumulative = client.leaderboard(window="cumulative")
     rolling = client.leaderboard(window="rolling_24h")
 
-    def find_score(board: dict) -> float | None:
-        # /v1/leaderboard has no participant_id in its rows -- display_name
-        # is the only identifying field it returns (verified against the
-        # live response, not guessed from the OpenAPI schema, which leaves
-        # this endpoint's body untyped).
-        for entry in board.get("data", []):
-            if entry.get("display_name") == display_name:
-                return entry.get("accuracy")
-        return None
-
-    cum_score = find_score(cumulative)
-    roll_score = find_score(rolling)
+    cum_entry = find_entry(cumulative, display_name)
+    roll_entry = find_entry(rolling, display_name)
+    cum_score = cum_entry.get("accuracy") if cum_entry else None
+    roll_score = roll_entry.get("accuracy") if roll_entry else None
 
     signal = "not_enough_data"
     if cum_score is not None and roll_score is not None:
@@ -88,6 +91,15 @@ def check_drift(client: PulsoTransmiClient) -> dict:
     else:
         print(f"monitor: not enough leaderboard history yet to compare (cumulative={cum_score}, rolling={roll_score})")
 
+    # Persisted so the read-only dashboard can show leaderboard position
+    # without ever holding the submissions API key in the browser.
+    if cum_entry:
+        db.log_leaderboard_snapshot(conn, "cumulative", cum_entry.get("accuracy"), cum_entry.get("coverage"),
+                                     cum_entry.get("rank"), signal)
+    if roll_entry:
+        db.log_leaderboard_snapshot(conn, "rolling_24h", roll_entry.get("accuracy"), roll_entry.get("coverage"),
+                                     roll_entry.get("rank"), signal)
+
     return {"cumulative_accuracy": cum_score, "rolling_24h_accuracy": roll_score, "signal": signal}
 
 
@@ -96,8 +108,8 @@ def run() -> int:
     with db.connect() as conn:
         n = evaluate_resolved_predictions(conn)
         print(f"monitor: logged {n} newly-resolved validation_metrics row(s)")
+        drift = check_drift(client, conn)
 
-    drift = check_drift(client)
     if drift["signal"] == "performance_drift":
         print("monitor: PERFORMANCE DRIFT signal raised -- consider training a new candidate "
               "(train.py will only promote it if it actually beats the current champion).")
