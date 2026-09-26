@@ -2,13 +2,13 @@ name: pipeline
 
 on:
   schedule:
-    # Every 10 minutes, not just minute 07/37. GitHub's free-tier cron
-    # silently drops or delays scheduled runs under load -- in the first 47h
-    # of this pipeline only 12 of ~94 expected half-hourly triggers actually
-    # fired. A tighter schedule raises the odds that *some* trigger survives
-    # inside any given hour; each run that does fire then polls for up to
-    # 12 minutes (src/watch_and_submit.py) instead of checking once and
-    # giving up, so it doesn't need to land on an exact minute either.
+    # Redundant triggers -- GitHub's free-tier cron still doesn't fire
+    # reliably at 10-minute granularity (confirmed: most 10-minute slots
+    # never actually ran). This is just a backup fuse now: each run that
+    # DOES fire polls for up to 50 minutes (src/watch_and_submit.py), which
+    # alone covers most of any given hour, so getting a trigger every 10
+    # minutes is no longer load-bearing -- it only needs to fire once in a
+    # while to keep the relay going.
     - cron: "*/10 * * * *"
   workflow_dispatch: {}
 
@@ -16,15 +16,17 @@ env:
   PYTHONPATH: src
 
 concurrency:
-  # If a previous run is still polling when a new one fires, let the new one
-  # take over instead of piling up parallel runners against the same cycle.
+  # Queue instead of cancel: if a run is mid-poll when the next trigger
+  # fires, let it finish its 50-minute window and have the new one start
+  # right after, so coverage chains continuously instead of a fresh trigger
+  # killing a run that might be seconds from catching an open cycle.
   group: pipeline
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
 
