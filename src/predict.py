@@ -45,6 +45,12 @@ def run() -> int:
     origin_at = pd.Timestamp(cycle["origin_at"])
 
     with db.connect() as conn:
+        if db.already_submitted(conn, cycle_id):
+            print(f"predict: {cycle_id} already has a successful submission on record "
+                  f"(from an earlier job -- watch_and_submit.py's self-retriggering starts each "
+                  f"run with no memory of what a previous one submitted); skipping.")
+            return 0
+
         run_id = db.start_pipeline_run(conn, data_cutoff, f"predict for {cycle_id}")
 
         active = db.get_active_model(conn) if conn is not None else None

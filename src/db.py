@@ -75,6 +75,26 @@ def upsert_observations(conn, rows: list[dict]) -> None:
         )
 
 
+def already_submitted(conn, cycle_id: str) -> bool:
+    """True if THIS cycle already has a successful submission on record --
+    checked against Supabase, not in-process memory. watch_and_submit.py's
+    self-retriggering means a brand new job (fresh process, no memory of
+    what a PREVIOUS job already submitted) can pick up a cycle that's still
+    technically open per the API and try to resubmit it with slightly
+    different data, tripping the API's idempotency_conflict check on every
+    retry. Caught live: a cycle submitted successfully at 22:48 got
+    retried 8 times starting at 23:08 by a new job that had no way to know
+    it was already handled."""
+    if conn is None:
+        return False
+    with conn.cursor() as cur:
+        cur.execute(
+            "select 1 from pipeline_runs where status = 'success' and notes like %s limit 1",
+            (f"predict for {cycle_id} | submission_id=%",),
+        )
+        return cur.fetchone() is not None
+
+
 def start_pipeline_run(conn, data_cutoff: str | None, notes: str) -> str | None:
     if conn is None:
         return None
