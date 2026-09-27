@@ -1,23 +1,21 @@
-"""Evaluation + drift monitoring.
+"""Evaluation + drift monitoring, run as the last part of the hourly
+pipeline job (src/watch_and_submit.py) -- no separate scheduled workflow.
 
 Local step: for predictions whose target has since been observed, compute a
 per-station/horizon WAPE-based accuracy and log it to validation_metrics --
 this is a diagnostic granularity to spot *which* station/horizon degrades,
 not the official score (that's computed server-side).
 
-Drift step: compares this participant's official rolling-24h accuracy
-against their cumulative accuracy from /v1/leaderboard. The 5-point
-threshold below is a starting point, not a validated number -- the guide
-is explicit that drift thresholds must be justified, not copied
-(guia metodologica p.17). Revisit it once there's enough history to see
-what normal cycle-to-cycle noise looks like.
+Leaderboard step: records this participant's official cumulative/rolling-24h
+standing (src/drift.py handles the real per-station drift detection now --
+see that module for PSI + rolling-WAPE-vs-champion, confirmation streaks,
+and the guarded retrain trigger).
 """
 import sys
 
 import db
+import drift
 from api_client import PulsoTransmiClient
-
-DRIFT_THRESHOLD_POINTS = 5.0
 
 
 def evaluate_resolved_predictions(conn) -> int:
@@ -71,48 +69,46 @@ def find_entry(board: dict, display_name: str) -> dict | None:
     return None
 
 
-def check_drift(client: PulsoTransmiClient, conn) -> dict:
+def record_leaderboard_position(client: PulsoTransmiClient, conn) -> None:
     me = client.session.get(f"{client.base_url}/v1/me", headers=client.auth_headers(), timeout=20).json()
     display_name = me.get("display_name")
 
     cumulative = client.leaderboard(window="cumulative")
     rolling = client.leaderboard(window="rolling_24h")
-
     cum_entry = find_entry(cumulative, display_name)
     roll_entry = find_entry(rolling, display_name)
-    cum_score = cum_entry.get("accuracy") if cum_entry else None
-    roll_score = roll_entry.get("accuracy") if roll_entry else None
-
-    signal = "not_enough_data"
-    if cum_score is not None and roll_score is not None:
-        drop = cum_score - roll_score
-        signal = "performance_drift" if drop >= DRIFT_THRESHOLD_POINTS else "stable"
-        print(f"monitor: cumulative={cum_score:.2f} rolling_24h={roll_score:.2f} drop={drop:.2f} -> {signal}")
-    else:
-        print(f"monitor: not enough leaderboard history yet to compare (cumulative={cum_score}, rolling={roll_score})")
 
     # Persisted so the read-only dashboard can show leaderboard position
-    # without ever holding the submissions API key in the browser.
+    # without ever holding the submissions API key in the browser. This is
+    # informational only now -- src/drift.py owns the real drift signal.
     if cum_entry:
         db.log_leaderboard_snapshot(conn, "cumulative", cum_entry.get("accuracy"), cum_entry.get("coverage"),
-                                     cum_entry.get("rank"), signal)
+                                     cum_entry.get("rank"), "n/a")
+        print(f"monitor: cumulative accuracy={cum_entry.get('accuracy'):.2f} rank={cum_entry.get('rank')}")
     if roll_entry:
         db.log_leaderboard_snapshot(conn, "rolling_24h", roll_entry.get("accuracy"), roll_entry.get("coverage"),
-                                     roll_entry.get("rank"), signal)
-
-    return {"cumulative_accuracy": cum_score, "rolling_24h_accuracy": roll_score, "signal": signal}
+                                     roll_entry.get("rank"), "n/a")
+        print(f"monitor: rolling_24h accuracy={roll_entry.get('accuracy'):.2f} rank={roll_entry.get('rank')}")
 
 
 def run() -> int:
     client = PulsoTransmiClient()
+    cycle = client.current_cycle()
+    cycle_id = cycle.get("cycle_id") if cycle else None
+
     with db.connect() as conn:
         n = evaluate_resolved_predictions(conn)
         print(f"monitor: logged {n} newly-resolved validation_metrics row(s)")
-        drift = check_drift(client, conn)
 
-    if drift["signal"] == "performance_drift":
-        print("monitor: PERFORMANCE DRIFT signal raised -- consider training a new candidate "
-              "(train.py will only promote it if it actually beats the current champion).")
+        record_leaderboard_position(client, conn)
+
+        # Passive drift checks (PSI + rolling WAPE per station) and, only if
+        # confirmed and past its guards, dispatching train-on-drift -- see
+        # src/drift.py. Runs inside this same job on purpose: it's cheap
+        # Python + SQL, and this job runs hourly regardless, so it costs no
+        # extra GitHub Actions minutes.
+        drift.run(conn, run_id=None, cycle_id=cycle_id)
+
     return 0
 
 

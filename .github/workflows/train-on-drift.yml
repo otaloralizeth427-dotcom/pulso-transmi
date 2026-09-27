@@ -1,0 +1,57 @@
+name: train-on-drift
+
+# No `schedule` trigger on purpose -- this only ever runs when
+# src/drift.py (inside the hourly pipeline job) confirms performance drift
+# on one or more stations and dispatches it via `gh workflow run` with the
+# default GITHUB_TOKEN. Days with no drift injected cost zero Actions
+# minutes here.
+on:
+  workflow_dispatch:
+    inputs:
+      stations:
+        description: "Comma-separated station_ids flagged by drift.py"
+        required: true
+      trigger_id:
+        description: "retrain_triggers.id this run reports its outcome back to"
+        required: true
+
+env:
+  PYTHONPATH: src
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    # Separate from pipeline.yml's 55 min (that job only does inference).
+    # Training all 12 stations locally took ~35-75s on a fast machine;
+    # generous headroom for a slower/loaded GitHub runner.
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Train candidate, upweighting the drifted stations
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          DRIFT_STATIONS: ${{ github.event.inputs.stations }}
+          RETRAIN_TRIGGER_ID: ${{ github.event.inputs.trigger_id }}
+        run: python src/train.py
+
+      - name: Commit new model artifact (if any)
+        run: |
+          git config user.name "pulso-transmi-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add artifacts/models/
+          if ! git diff --cached --quiet; then
+            git commit -m "train: drift-triggered candidate for stations ${{ github.event.inputs.stations }} (trigger ${{ github.event.inputs.trigger_id }})"
+            git push
+          else
+            echo "no new artifact to commit"
+          fi

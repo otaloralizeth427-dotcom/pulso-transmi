@@ -44,6 +44,11 @@ jobs:
         env:
           PTM_API_KEY: ${{ secrets.PTM_API_KEY }}
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          # Needed here too, not just the relay step below: monitor.py (run
+          # at the end of watch_and_submit.py) calls src/drift.py, which
+          # dispatches train-on-drift.yml via `gh workflow run` when it
+          # confirms performance drift.
+          GH_TOKEN: ${{ github.token }}
         run: python src/watch_and_submit.py
 
       - name: Relay to the next run

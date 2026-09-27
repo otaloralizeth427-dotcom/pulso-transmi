@@ -118,26 +118,29 @@ def get_active_model(conn) -> dict | None:
         return None
     with conn.cursor() as cur:
         cur.execute(
-            "select model_version, trained_at, feature_set, metrics_summary "
+            "select model_version, trained_at, feature_set, metrics_summary, psi_reference "
             "from model_state where is_active = true order by trained_at desc limit 1"
         )
         row = cur.fetchone()
         if not row:
             return None
-        return {"model_version": row[0], "trained_at": row[1], "feature_set": row[2], "metrics_summary": row[3]}
+        return {"model_version": row[0], "trained_at": row[1], "feature_set": row[2], "metrics_summary": row[3],
+                "psi_reference": row[4]}
 
 
-def promote_model(conn, model_version: str, trained_at: str, feature_set: dict, metrics_summary: dict) -> None:
+def promote_model(conn, model_version: str, trained_at: str, feature_set: dict, metrics_summary: dict,
+                   psi_reference: dict | None = None) -> None:
     if conn is None:
         return
     with conn.cursor() as cur:
         cur.execute("update model_state set is_active = false where is_active = true")
         cur.execute(
             """
-            insert into model_state (model_version, trained_at, is_active, feature_set, metrics_summary)
-            values (%s, %s, true, %s, %s)
+            insert into model_state (model_version, trained_at, is_active, feature_set, metrics_summary, psi_reference)
+            values (%s, %s, true, %s, %s, %s)
             """,
-            (model_version, trained_at, psycopg2_json(feature_set), psycopg2_json(metrics_summary)),
+            (model_version, trained_at, psycopg2_json(feature_set), psycopg2_json(metrics_summary),
+             psycopg2_json(psi_reference) if psi_reference is not None else None),
         )
 
 
@@ -185,6 +188,101 @@ def log_leaderboard_snapshot(conn, window_kind: str, accuracy, coverage, rank, s
             """,
             (window_kind, accuracy, coverage, rank, signal),
         )
+
+
+def log_drift_event(conn, *, run_id, cycle_id, station_id, champion_version, psi_flag, psi_max_feature,
+                     psi_max_value, psi_details, performance_flag, performance_confirmed, rolling_wape_24h,
+                     champion_valid_accuracy, n_cycles_confirming) -> str | None:
+    if conn is None:
+        return None
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            insert into drift_events (run_id, cycle_id, station_id, champion_version, psi_flag, psi_max_feature,
+                psi_max_value, psi_details, performance_flag, performance_confirmed, rolling_wape_24h,
+                champion_valid_accuracy, n_cycles_confirming)
+            values (%(run_id)s, %(cycle_id)s, %(station_id)s, %(champion_version)s, %(psi_flag)s,
+                %(psi_max_feature)s, %(psi_max_value)s, %(psi_details)s, %(performance_flag)s,
+                %(performance_confirmed)s, %(rolling_wape_24h)s, %(champion_valid_accuracy)s,
+                %(n_cycles_confirming)s)
+            returning id
+            """,
+            {
+                "run_id": run_id, "cycle_id": cycle_id, "station_id": station_id,
+                "champion_version": champion_version, "psi_flag": psi_flag, "psi_max_feature": psi_max_feature,
+                "psi_max_value": psi_max_value, "psi_details": psycopg2_json(psi_details) if psi_details else None,
+                "performance_flag": performance_flag, "performance_confirmed": performance_confirmed,
+                "rolling_wape_24h": rolling_wape_24h, "champion_valid_accuracy": champion_valid_accuracy,
+                "n_cycles_confirming": n_cycles_confirming,
+            },
+        )
+        return str(cur.fetchone()[0])
+
+
+def get_recent_performance_flags(conn, station_id: str, n: int) -> list[bool]:
+    """Last `n` performance_flag values for this station, most recent first
+    -- used to confirm a drift streak instead of reacting to one noisy cycle."""
+    if conn is None:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            "select performance_flag from drift_events where station_id = %s order by checked_at desc limit %s",
+            (station_id, n),
+        )
+        return [row[0] for row in cur.fetchall()]
+
+
+def get_last_retrain_trigger_time(conn):
+    """Anchors the cooldown guard on DISPATCH time (triggered_at), not on
+    when a past retrain finished or promoted -- a long-running retrain
+    can't get overlapped by a second trigger fired while it's still going."""
+    if conn is None:
+        return None
+    with conn.cursor() as cur:
+        cur.execute("select triggered_at from retrain_triggers order by triggered_at desc limit 1")
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
+def insert_retrain_trigger(conn, drift_event_id: str, stations: list[str], reason: str) -> str | None:
+    if conn is None:
+        return None
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            insert into retrain_triggers (triggered_at, drift_event_id, stations, reason, status)
+            values (now(), %s, %s, %s, 'dispatched')
+            returning id
+            """,
+            (drift_event_id, stations, reason),
+        )
+        return str(cur.fetchone()[0])
+
+
+def complete_retrain_trigger(conn, trigger_id: str, *, promoted: bool, candidate_version: str,
+                              candidate_accuracy: float, champion_accuracy: float) -> None:
+    if conn is None or not trigger_id:
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            update retrain_triggers
+            set status = 'completed', completed_at = now(), promoted = %s, candidate_version = %s,
+                candidate_accuracy = %s, champion_accuracy = %s
+            where id = %s
+            """,
+            (promoted, candidate_version, candidate_accuracy, champion_accuracy, trigger_id),
+        )
+
+
+def count_new_observations(conn, since) -> int:
+    """Total new observation rows across all stations since `since` --
+    the minimum-new-data guard before allowing a drift-triggered retrain."""
+    if conn is None:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute("select count(*) from observations where observed_at > %s", (since,))
+        return cur.fetchone()[0]
 
 
 def psycopg2_json(value: dict):
