@@ -1,9 +1,15 @@
 """Trains a CatBoost candidate, validates it with a temporal split (never a
-random split -- see guia metodologica p.6), compares it against the
-shift-24h baseline on the same validation slice using the official metric,
-and only promotes it to champion if it both beats the baseline AND
-completes a dry-run inference. Novelty alone is never grounds to promote
-(guia metodologica p.11).
+random split -- see guia metodologica p.6), and only promotes it to
+champion if it beats BOTH the shift-24h baseline and the currently active
+champion on the same validation slice, plus completes a dry-run inference.
+Novelty alone is never grounds to promote (guia metodologica p.11).
+
+Earlier versions of this script only required beating the naive baseline,
+not the live champion -- since CatBoost reliably clears that low bar, every
+retraining run promoted automatically regardless of whether the new
+candidate was actually better than what was already deployed. Caught this
+the first time a retrain produced a candidate (81.71) slightly below the
+previous champion's own validation score (82.46) and it still promoted.
 """
 import subprocess
 import sys
@@ -90,7 +96,20 @@ def run() -> int:
         baseline_pred = valid_df["lag_1440"]  # shift-24h baseline, same feature already computed
         baseline_accuracy = official_accuracy(y_valid, baseline_pred, valid_df["station_id"])
 
-        print(f"train: validation accuracy -- candidate={candidate_accuracy:.2f}  baseline={baseline_accuracy:.2f}")
+        active = db.get_active_model(conn)
+        champion_version = active["model_version"] if active else None
+        if champion_version and champion_version.startswith("catboost-"):
+            champion_model = CatBoostRegressor()
+            champion_model.load_model(f"{ARTIFACT_DIR}/{champion_version}.cbm")
+            champion_pred = pd.Series(np.clip(champion_model.predict(X_valid), 0, None), index=valid_df.index)
+            champion_accuracy = official_accuracy(y_valid, champion_pred, valid_df["station_id"])
+        else:
+            # No CatBoost champion deployed yet (still on the baseline) --
+            # beating the baseline itself is the only bar to clear.
+            champion_accuracy = baseline_accuracy
+
+        print(f"train: validation accuracy -- candidate={candidate_accuracy:.2f}  "
+              f"baseline={baseline_accuracy:.2f}  current_champion({champion_version})={champion_accuracy:.2f}")
 
         trained_at = datetime.now(timezone.utc).isoformat()
         commit = git_commit()
@@ -109,6 +128,8 @@ def run() -> int:
         metrics_summary = {
             "candidate_accuracy": candidate_accuracy,
             "baseline_accuracy": baseline_accuracy,
+            "champion_accuracy": champion_accuracy,
+            "champion_version_compared": champion_version,
             "validation_days": VALIDATION_DAYS,
             "validation_rows": len(valid_df),
             "train_rows": len(train_df),
@@ -117,7 +138,8 @@ def run() -> int:
         }
         feature_set = {"columns": features.FEATURE_COLUMNS, "categorical": features.CATEGORICAL_COLUMNS}
 
-        promote = candidate_accuracy > baseline_accuracy and dry_run_ok
+        beats_bar = candidate_accuracy > baseline_accuracy and candidate_accuracy > champion_accuracy
+        promote = beats_bar and dry_run_ok
 
         artifact_path = f"{ARTIFACT_DIR}/{version}.cbm"
         model.save_model(artifact_path)
@@ -126,10 +148,16 @@ def run() -> int:
         if promote:
             db.promote_model(conn, version, trained_at, feature_set, metrics_summary)
             print(f"train: PROMOTED {version} to champion "
-                  f"({candidate_accuracy:.2f} > baseline {baseline_accuracy:.2f}, dry run ok)")
+                  f"({candidate_accuracy:.2f} > baseline {baseline_accuracy:.2f} and > "
+                  f"current champion {champion_accuracy:.2f}, dry run ok)")
         else:
             db.register_candidate(conn, version, trained_at, feature_set, metrics_summary)
-            reason = "did not beat baseline" if candidate_accuracy <= baseline_accuracy else "dry-run inference failed"
+            if not dry_run_ok:
+                reason = "dry-run inference failed"
+            elif candidate_accuracy <= champion_accuracy:
+                reason = f"did not beat current champion ({candidate_accuracy:.2f} <= {champion_accuracy:.2f})"
+            else:
+                reason = "did not beat baseline"
             print(f"train: NOT promoted ({reason}). Champion unchanged. Candidate kept as evidence.")
 
     return 0
