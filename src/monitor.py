@@ -96,18 +96,34 @@ def run() -> int:
     cycle = client.current_cycle()
     cycle_id = cycle.get("cycle_id") if cycle else None
 
-    with db.connect() as conn:
-        n = evaluate_resolved_predictions(conn)
-        print(f"monitor: logged {n} newly-resolved validation_metrics row(s)")
+    # Three independent steps, each its OWN connection/transaction, each
+    # wrapped so a failure in one can never roll back or block the others.
+    # Not hypothetical -- both failure modes below actually happened on the
+    # same day: a bad query in drift.py raised mid-transaction and rolled
+    # back everything sharing that transaction with it (validation_metrics
+    # AND the leaderboard snapshot), and separately the course's leaderboard
+    # API returned a transient 500 that would have done the same if it had
+    # still shared a connection with the evaluation step. The dashboard sat
+    # on stale data for over a day before this was caught.
+    try:
+        with db.connect() as conn:
+            n = evaluate_resolved_predictions(conn)
+            print(f"monitor: logged {n} newly-resolved validation_metrics row(s)")
+    except Exception as exc:
+        print(f"monitor: evaluating resolved predictions failed, leaving it for next cycle: {exc}")
 
-        record_leaderboard_position(client, conn)
+    try:
+        with db.connect() as conn:
+            record_leaderboard_position(client, conn)
+    except Exception as exc:
+        print(f"monitor: recording leaderboard position failed (likely a transient API error), "
+              f"leaving it for next cycle: {exc}")
 
-        # Passive drift checks (PSI + rolling WAPE per station) and, only if
-        # confirmed and past its guards, dispatching train-on-drift -- see
-        # src/drift.py. Runs inside this same job on purpose: it's cheap
-        # Python + SQL, and this job runs hourly regardless, so it costs no
-        # extra GitHub Actions minutes.
-        drift.run(conn, run_id=None, cycle_id=cycle_id)
+    try:
+        with db.connect() as conn:
+            drift.run(conn, run_id=None, cycle_id=cycle_id)
+    except Exception as exc:
+        print(f"monitor: drift check failed, leaving it for next cycle: {exc}")
 
     return 0
 

@@ -149,6 +149,7 @@ def evaluate_stations(conn, run_id: str | None, cycle_id: str | None) -> list[di
             confirmed.append({
                 "station_id": sid,
                 "drift_event_id": event_id,
+                "rolling_wape_24h": rolling_wape,
                 # Virtual-clock timestamp, not wall-clock trained_at --
                 # observations.observed_at lives on the competition's
                 # virtual clock, a completely different timeline.
@@ -187,14 +188,17 @@ def maybe_trigger_retrain(conn, confirmed: list[dict]) -> None:
         return
 
     # Point at the confirming event of the station with the worst rolling
-    # WAPE -- the single row that best explains "why this fired".
-    with conn.cursor() as cur:
-        cur.execute(
-            "select id from drift_events where id = any(%s) order by rolling_wape_24h desc nulls last limit 1",
-            ([c["drift_event_id"] for c in confirmed],),
-        )
-        row = cur.fetchone()
-        primary_event_id = row[0] if row else confirmed[0]["drift_event_id"]
+    # WAPE -- the single row that best explains "why this fired". Picked
+    # locally from `confirmed` (already has everything needed) rather than
+    # re-querying drift_events -- an earlier version did
+    # `where id = any(%s)` with a list of UUID strings, which Postgres
+    # rejects as "operator does not exist: uuid = text" without an explicit
+    # cast. That exception propagated out of the whole `with db.connect()`
+    # block in monitor.py, silently rolling back everything else done in
+    # the same transaction (validation_metrics, the leaderboard snapshot,
+    # every drift_events row for that cycle) -- caught live: the dashboard
+    # sat frozen for over a day before this was found.
+    primary_event_id = max(confirmed, key=lambda c: c["rolling_wape_24h"] or 0)["drift_event_id"]
 
     reason_text = f"confirmed performance drift on {stations} for {CONFIRM_STREAK}+ consecutive cycles"
     trigger_id = db.insert_retrain_trigger(conn, primary_event_id, stations, reason_text)
