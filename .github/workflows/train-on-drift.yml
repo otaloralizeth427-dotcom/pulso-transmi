@@ -51,7 +51,21 @@ jobs:
           git add artifacts/models/
           if ! git diff --cached --quiet; then
             git commit -m "train: drift-triggered candidate for stations ${{ github.event.inputs.stations }} (trigger ${{ github.event.inputs.trigger_id }})"
-            git push
+            # Retry with rebase on a push race (caught live: this job's push
+            # lost a race against a concurrent manual push once, and because
+            # train.py's promotion in Supabase already happened in the
+            # previous step, the champion was left pointing at an artifact
+            # file that was never actually committed -- predict.py's next
+            # run would have crashed trying to load it. Had to revert the
+            # promotion by hand. A few retries here make that coincidence
+            # not fatal.
+            for i in 1 2 3 4 5; do
+              if git push; then break; fi
+              echo "push rejected, retrying with rebase (attempt $i)"
+              git fetch origin main
+              git rebase origin/main
+              sleep $((i * 3))
+            done
           else
             echo "no new artifact to commit"
           fi

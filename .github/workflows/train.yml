@@ -40,7 +40,17 @@ jobs:
           git add artifacts/models/
           if ! git diff --cached --quiet; then
             git commit -m "train: new model artifact from scheduled/manual run"
-            git push
+            # Retry with rebase on a push race -- see train-on-drift.yml for
+            # why this matters: train.py already promoted in Supabase by
+            # this point, so a lost push race leaves the champion pointing
+            # at an artifact that was never committed.
+            for i in 1 2 3 4 5; do
+              if git push; then break; fi
+              echo "push rejected, retrying with rebase (attempt $i)"
+              git fetch origin main
+              git rebase origin/main
+              sleep $((i * 3))
+            done
           else
             echo "no new artifact to commit"
           fi
