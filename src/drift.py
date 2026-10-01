@@ -35,7 +35,12 @@ PERFORMANCE_DROP_THRESHOLD = 10.0  # percentage points below the champion's
                                     # own per-station validation accuracy
 CONFIRM_STREAK = 3  # consecutive cycles required (guia p.17: "reaccionar a
                      # persistencia", not a single noisy cycle)
-COOLDOWN_HOURS = 8   # mid-range of the 6-12h the user asked for
+COOLDOWN_HOURS = 4   # lowered from 8 by user decision: the real protection
+                      # against noise-chasing is CONFIRM_STREAK (3 straight
+                      # cycles) and MIN_NEW_OBSERVATIONS below, not this --
+                      # the cooldown only stops back-to-back retrains on the
+                      # same still-ongoing issue, and 8h was leaving
+                      # confirmed-degraded stations unfixed most of a day.
 MIN_NEW_OBSERVATIONS = 96  # ~1 day of 15-min data per flagged station,
                             # before a retrain is even worth attempting
 RECENT_WINDOW_DAYS = 3  # how much recent data PSI's "current" side looks at
