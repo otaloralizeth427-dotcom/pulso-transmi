@@ -56,6 +56,18 @@ PSI_FEATURES = ["ratio_vs_yesterday"]  # deseasonalized signal: lag_0 /
 # "per-station" PSI on it would read identical across all 12 stations.
 PSI_BINS = 10
 DRIFT_WEIGHT_MULTIPLIER = 3.0
+DRIFT_RECENCY_HALF_LIFE_DAYS = 7  # exponential recency weight for a
+# drift-triggered retrain: weight = 0.5 ** (age_days / half_life). Tried a
+# hard window cutoff first (train only on the last N days) -- it still
+# lost to the champion, because the real injected drift turned out to be
+# only ~19 hours old at the time: even a 14-day window was 94% stale data.
+# Tested half-lives from 1 to 999 days against live data once that was
+# known: very aggressive decay (1d) UNDERPERFORMED a plain full-history fit
+# -- with that little genuine post-drift signal, leaning on it exclusively
+# starves the model of the broader day-of-week/hour structure it still
+# needs. 7d gave the best validation accuracy among those tested (noisy
+# signal, not a sharp optimum) -- moderate decay, not aggressive. Revisit
+# once more post-drift data has actually accumulated.
 
 
 def per_station_accuracy(y_true: pd.Series, y_pred: pd.Series, station_ids: pd.Series) -> dict:
@@ -110,6 +122,7 @@ def git_commit() -> str | None:
 def run() -> int:
     drift_stations = {s.strip() for s in os.environ.get("DRIFT_STATIONS", "").split(",") if s.strip()}
     retrain_trigger_id = os.environ.get("RETRAIN_TRIGGER_ID")
+    is_drift_retrain = bool(drift_stations)
 
     with db.connect() as conn:
         if conn is None:
@@ -127,6 +140,7 @@ def run() -> int:
         cutoff = frame["origin_at"].max() - pd.Timedelta(days=VALIDATION_DAYS)
         train_df = frame[frame["origin_at"] < cutoff]
         valid_df = frame[frame["origin_at"] >= cutoff]
+
         print(f"train: {len(train_df)} training rows, {len(valid_df)} validation rows "
               f"(split at {cutoff}, last {VALIDATION_DAYS}d held out)")
 
@@ -140,10 +154,16 @@ def run() -> int:
         y_valid = valid_df["y"]
 
         sample_weight = None
-        if drift_stations:
-            sample_weight = np.where(train_df["station_id"].isin(drift_stations), DRIFT_WEIGHT_MULTIPLIER, 1.0)
-            print(f"train: upweighting {sorted(drift_stations)} by {DRIFT_WEIGHT_MULTIPLIER}x "
-                  f"({int((sample_weight > 1).sum())} of {len(sample_weight)} rows)")
+        if is_drift_retrain:
+            age_days = (train_df["origin_at"].max() - train_df["origin_at"]).dt.total_seconds() / 86400
+            sample_weight = np.exp(-np.log(2) / DRIFT_RECENCY_HALF_LIFE_DAYS * age_days).to_numpy()
+            print(f"train: drift retrain -- applying recency weight (half_life={DRIFT_RECENCY_HALF_LIFE_DAYS}d), "
+                  f"min={sample_weight.min():.4f} max={sample_weight.max():.4f}")
+            if drift_stations:
+                station_multiplier = np.where(train_df["station_id"].isin(drift_stations), DRIFT_WEIGHT_MULTIPLIER, 1.0)
+                sample_weight = sample_weight * station_multiplier
+                print(f"train: additionally upweighting {sorted(drift_stations)} by {DRIFT_WEIGHT_MULTIPLIER}x "
+                      f"({int((station_multiplier > 1).sum())} of {len(station_multiplier)} rows)")
 
         cat_idx = [features.FEATURE_COLUMNS.index(c) for c in features.CATEGORICAL_COLUMNS]
         model = CatBoostRegressor(
