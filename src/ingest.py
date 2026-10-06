@@ -11,6 +11,18 @@ from api_client import PulsoTransmiClient
 SOURCE = "stream_observations"
 
 
+def _demand(row: dict) -> int | None:
+    """schema_version 2 (served from 2026-09-20 onward) nests the count under
+    measurement.value as a string and marks gaps quality="missing" -- those
+    gaps are dropped, never written as zero."""
+    if "demand" in row:
+        return row["demand"]
+    measurement = row.get("measurement") or {}
+    if measurement.get("quality") != "observed" or measurement.get("value") in (None, ""):
+        return None
+    return int(round(float(measurement["value"])))
+
+
 def run() -> int:
     client = PulsoTransmiClient()
     with db.connect() as conn:
@@ -23,8 +35,13 @@ def run() -> int:
             page = client.stream_observations_page(cursor=cursor, limit=5000)
             rows = page["data"]
             if rows:
-                db.upsert_observations(conn, rows)
-                total += len(rows)
+                kept = []
+                for row in rows:
+                    demand = _demand(row)
+                    if demand is not None:
+                        kept.append({**row, "demand": demand})
+                db.upsert_observations(conn, kept)
+                total += len(kept)
                 last_observed_at = rows[-1]["observed_at"]
             next_cursor = page.get("next_cursor")
             pages += 1
