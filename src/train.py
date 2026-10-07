@@ -183,6 +183,13 @@ def run() -> int:
         baseline_pred = valid_df["lag_1440"]  # shift-24h baseline, same feature already computed
         baseline_accuracy = official_accuracy(y_valid, baseline_pred, valid_df["station_id"])
 
+        # Second baseline, for comparison/reporting only -- promotion still
+        # only requires beating baseline_pred (shift-24h) above, per the
+        # existing rule. roll_mean_4 (mean of the last 4 x 15min = last hour)
+        # is already a computed feature, so this is free.
+        baseline2_pred = valid_df["roll_mean_4"]
+        baseline2_accuracy = official_accuracy(y_valid, baseline2_pred, valid_df["station_id"])
+
         active = db.get_active_model(conn)
         champion_version = active["model_version"] if active else None
         if champion_version and champion_version.startswith("catboost-"):
@@ -196,7 +203,8 @@ def run() -> int:
             champion_accuracy = baseline_accuracy
 
         print(f"train: validation accuracy -- candidate={candidate_accuracy:.2f}  "
-              f"baseline={baseline_accuracy:.2f}  current_champion({champion_version})={champion_accuracy:.2f}")
+              f"baseline_shift24h={baseline_accuracy:.2f}  baseline_rollmean1h={baseline2_accuracy:.2f}  "
+              f"current_champion({champion_version})={champion_accuracy:.2f}")
 
         trained_at = datetime.now(timezone.utc).isoformat()
         commit = git_commit()
@@ -216,6 +224,8 @@ def run() -> int:
             "candidate_accuracy": candidate_accuracy,
             "candidate_per_station_accuracy": candidate_per_station,
             "baseline_accuracy": baseline_accuracy,
+            "baseline2_name": "rolling_mean_1h",
+            "baseline2_accuracy": baseline2_accuracy,
             "champion_accuracy": champion_accuracy,
             "champion_version_compared": champion_version,
             # The most recent data point this model has ever seen, on the
