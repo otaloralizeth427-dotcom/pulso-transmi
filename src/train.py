@@ -40,6 +40,7 @@ from catboost import CatBoostRegressor, Pool
 
 import db
 import features
+import tracking
 
 VALIDATION_DAYS = 7
 ARTIFACT_DIR = "artifacts/models"
@@ -267,6 +268,9 @@ def run() -> int:
             else:
                 reason = "did not beat baseline"
             print(f"train: NOT promoted ({reason}). Champion unchanged. Candidate kept as evidence.")
+
+        if tracking.log_training_run(version, trained_at, metrics_summary, feature_set, promote):
+            print(f"train: logged {version} to MLflow experiment '{tracking.EXPERIMENT_NAME}'")
 
         if retrain_trigger_id:
             db.complete_retrain_trigger(conn, retrain_trigger_id, promoted=promote, candidate_version=version,

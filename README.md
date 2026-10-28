@@ -69,6 +69,28 @@ python src/monitor.py   # evalúa lo ya resuelto y revisa drift
 python src/train.py     # entrena un candidato CatBoost; promueve solo si gana
 ```
 
+## Tracking de experimentos (MLflow)
+
+`src/tracking.py` registra cada entrenamiento de `train.py` en el
+experimento `pulso-transmi-demand` (accuracy del candidato, del champion y
+de los dos baselines, accuracy por estación, lift vs. baseline, si fue
+promovido y qué lo disparó). Es opcional: sólo corre si `mlflow` está
+instalado (`requirements-mlflow.txt`) y `MLFLOW_TRACKING_URI` está
+definido, para que el pipeline nunca falle por falta de tracking.
+
+MLflow se agregó después del cierre de la competencia. Los 15
+entrenamientos anteriores (registrados en `model_state` en Supabase) se
+cargaron con `src/mlflow_backfill.py`, que reproduce esas filas tal cual
+-- no reentrena nada -- y las etiqueta `source=backfill:model_state`:
+
+```bash
+pip install -r requirements.txt -r requirements-mlflow.txt
+export MLFLOW_TRACKING_URI=sqlite:///mlflow.db
+export SUPABASE_URL=https://<ref>.supabase.co SUPABASE_ANON_KEY=<clave publica>
+python src/mlflow_backfill.py
+mlflow ui --backend-store-uri sqlite:///mlflow.db
+```
+
 ## GitHub Actions — secrets necesarios
 
 En Settings → Secrets and variables → Actions del repo:
